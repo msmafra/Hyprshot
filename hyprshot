@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
 set -e
+declare VERSION
+VERSION="1.3.1"
+
 
 function Help() {
     cat <<EOF
@@ -27,6 +30,7 @@ Options:
   -r, --raw                 output raw image data to stdout
   -t, --notif-timeout       notification timeout in milliseconds (default 5000)
   --clipboard-only          copy screenshot to clipboard and don't save image in disk
+  -v, --version             show current version
   -- [command]              open screenshot with a command of your choosing. e.g. hyprshot -m window -- mirage
 
 Modes:
@@ -279,6 +283,10 @@ function args() {
             -t | --notif-timeout)
                 shift;
                 NOTIF_TIMEOUT=$1
+                ;;
+            -v | --version)
+                shift;
+                printf "Hyprshot version: %s\n" "${VERSION}"
                 ;;
             --)
                 shift # Skip -- argument
