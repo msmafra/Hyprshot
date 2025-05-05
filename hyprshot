@@ -3,13 +3,16 @@ LC_ALL=C
 #{{{ Bash settings
 # set -o errexit
 # set -o nounset
-set -o pipefail
-set -o errtrace
+# set -o pipefail
+# set -o errtrace
 #}}}
 main() {
 
     local SCRIPT_NAME
+    SCRIPT_NAME="$(basename "${0}")"
     local VERSION
+    VERSION="1.4.0"
+
     local -gi CLIPBOARD
     local -gi DEBUG
     local -gi SILENT
@@ -18,22 +21,17 @@ main() {
     local -gi CURRENT
     local -gi FREEZE
     local -g FILENAME
-    local -g SAVE_FULLPATH
     local -g SAVEDIR
+    local -g SAVE_FULLPATH
     local -g HYPRSHOT_DIR
     local -g OPTION
     local -g SELECTED_MONITOR
     local -gi HYPRPICKER_PID
     local -g HYPRSHOT_DIR
+    local -i ANNOTATE
+    local -gi CURSOR
+    local -g GRABBER
 
-    SCRIPT_NAME="$(basename "${0}")"
-
-    if [[ -z "${1}" ]]; then
-        Help
-        exit
-    fi
-
-    VERSION="1.4.0"
     CLIPBOARD=0
     DEBUG=0
     SILENT=0
@@ -47,20 +45,30 @@ main() {
     ANNOTATE=0
     CURSOR=0
     NOCLIPBOARD=0
+    SAVE_FULLPATH="${SAVEDIR}/${FILENAME}"
+    GRABBER="$(select_grab_tool)"
 
+    initial_checks
     args "${0}" "${@}"
 
-    SAVE_FULLPATH="${SAVEDIR}/${FILENAME}"
-    [[ "${CLIPBOARD}" -eq 0 ]] && Print "Saving in: %s\n" "${SAVE_FULLPATH}"
-    select_helper
+    if [[ -z "${1}" ]]; then
+        show_help
+        exit
+    fi
+
+    [[ "${CLIPBOARD}" -eq 0 ]] && re_print "Saving in: %s\n" "${SAVE_FULLPATH}"
+
     begin_grab "${OPTION}" &
-    checkRunning
+    check_running
+
+    unset -f show_help send_notification send_notication re_print trim save_geometry check_running begin_grab grab_output grab_viewport show_viewport grab_active_output grab_selected_output grab_region grab_window grab_active_window validate_modes parse_mode args annotate select_grab_tool show_version
 }
 
-function Help() {
+function show_help() {
 
-    cat <<EOF
-Usage: ${SCRIPT_NAME} [options ..] [-m [mode] ..] -- [command]
+    local help_message
+
+    help_message="Usage: ${SCRIPT_NAME} [options ..] [-m [mode] ..] -- [command]
 
 Hyprshot is an utility to easily take screenshot in Hyprland using your mouse.
 
@@ -70,7 +78,7 @@ Examples:
   capture a window                                              '${SCRIPT_NAME} -m window'
   capture active window to clipboard                            '${SCRIPT_NAME} -m window -m active --clipboard-only'
   capture selected monitor                                      '${SCRIPT_NAME} -m output -m DP-1'
-  capture selected window and calls an annotation tool after    '${SCRIPT_NAME} -m window -a'
+  capture selected window and calls an annotation tool after    '${SCRIPT_NAME} -m window -n'
   capture active window without clipboard copying               '${SCRIPT_NAME} -m window -m active --no-clipboard'
 
 Options:
@@ -86,9 +94,11 @@ Options:
   -t, --notif-timeout       notification timeout in milliseconds (default 5000)
   --clipboard-only          copy screenshot to clipboard and don't save image in disk
   -v, --version             show current version
-  -a, --annotate            pass capture to an annotation tool (auto choose satty or swappy if installed)
+  -n, --annotate            pass capture to an annotation tool (auto choose satty or swappy if installed)
   -p, --viewport            to capture all screens at once
   --no-clipboard            take screenshot without copying it to the clipboard
+  -a, --active, --current   same as --mode active
+  --displays                returns displays/monitors info using hyprctl
   -- [command]              open screenshot with a command of your choosing. e.g. hyprshot -m window -- mirage
 
 Modes:
@@ -96,21 +106,122 @@ Modes:
   window        take screenshot of an open window
   region        take screenshot of selected region
   active        take screenshot of active window|output
-  viewport      take screenshot of all workspaces as one image
                 (you must use --mode again with the intended selection)
   OUTPUT_NAME   take screenshot of output with OUTPUT_NAME
                 (you must use --mode again with the intended selection)
-                (you can get this from 'hyprctl monitors')
-EOF
+                (you can get this from 'hyprctl monitors' or '${SCRIPT_NAME} --displays')
+  viewport      take screenshot of all outputs as one image
+"
 
+    printf "%b" "${help_message}"
 }
 
-function Print() {
+function args() {
+
+    local -a options
+    local SHORTOPTS
+    local LONGOPTS
+
+    SHORTOPTS="hf:o:m:D:dszrt:v::na"
+    LONGOPTS="help,filename:,output-folder:,mode:,delay:,clipboard-only,debug,silent,freeze,raw,notif-timeout:,version::,annotate,cursor,no-clipboard,active,current,displays"
+    options=$(getopt --name Hyprshot --options "${SHORTOPTS}" --longoptions "${LONGOPTS}" -- "${@}")
+
+    eval set -- "${options}"
+
+    while true; do
+        case "${1}" in
+        -h | --help)
+            show_help
+            exit
+            ;;
+        -o | --output-folder)
+            shift
+            SAVEDIR="${1}"
+            ;;
+        -f | --filename)
+            shift
+            FILENAME="${1}"
+            ;;
+        -D | --delay)
+            shift
+            DELAY="${1}"
+            ;;
+        -m | --mode)
+            shift
+            parse_mode "${1}"
+            ;;
+        --clipboard-only)
+            CLIPBOARD=1
+            ;;
+        -d | --debug)
+            DEBUG=1
+            ;;
+        -z | --freeze)
+            FREEZE=1
+            ;;
+        -s | --silent)
+            SILENT=1
+            ;;
+        -r | --raw)
+            RAW=1
+            ;;
+        -t | --notif-timeout)
+            shift
+            NOTIF_TIMEOUT="${1}"
+            ;;
+        -v | --version)
+            shift
+            show_version "${1}"
+            exit 0
+            ;;
+        -n | --annotate)
+            ANNOTATE=1
+            ;;
+        -a | --active | --current)
+            CURRENT=1
+            ;;
+        --cursor)
+            CURSOR=1
+            ;;
+        --no-clipboard)
+            NOCLIPBOARD=1
+            ;;
+        --displays)
+            displays_info "${@}"
+            ;;
+        --)
+            shift # Skip -- argument
+            COMMAND="${*:2}"
+            break
+            ;;
+        *)
+            shift
+            exit 1
+            ;;
+        esac
+        shift
+    done
+
+    # Errors out with unknown/invalid arguments
+    mode_req="A mode is required
+    Available modes are:
+        output
+        region
+        window
+
+        "
+    if [[ -z "${OPTION}" ]]; then
+        re_print "${mode_req}"
+        exit 2
+    fi
+}
+
+function re_print() {
     if [[ "${DEBUG}" -eq 0 ]]; then
         return 0
     fi
 
-    printf 1>&2 "%b" "${@}"
+    printf "%b" "${@}" >&2
 }
 
 function send_notification() {
@@ -132,12 +243,11 @@ function send_notification() {
             "${message}" \
             --expire-time="${NOTIF_TIMEOUT}" --icon="${1}" --app-name=Hyprshot
     fi
-
 }
 
 function trim() {
 
-    Print "Geometry: %s\n" "${1}"
+    re_print "Geometry: %s\n" "${1}"
     local geometry
     local xy_str
     local wh_str
@@ -192,9 +302,8 @@ function trim() {
     cropped=$(printf "%s,%s %sx%s\n" \
         "${cropped_x}" "${cropped_y}" \
         "${cropped_width}" "${cropped_height}")
-    Print "Crop: %s\n" "${cropped}"
+    re_print "Crop: %s\n" "${cropped}"
     printf "%s" "${cropped}"
-
 }
 
 function save_geometry() {
@@ -237,17 +346,15 @@ function save_geometry() {
     fi
 
     send_notification "${output}"
-
 }
 
-function checkRunning() {
+function check_running() {
 
     if [[ "${FREEZE}" -eq 1 ]]; then
-        sleep 1s
+        # sleep 1s
         pidwait --count slurp
         pkill --count --echo hyprpicker
     fi
-
 }
 
 function begin_grab() {
@@ -259,7 +366,7 @@ function begin_grab() {
         hyprpicker --render-inactive --no-zoom &
         sleep 0.2
         HYPRPICKER_PID="${!}"
-        Print "Hyperpicker PID: %s\n" ${HYPRPICKER_PID}
+        re_print "Hyperpicker PID: %s\n" ${HYPRPICKER_PID}
     fi
 
     option="${1}"
@@ -275,6 +382,10 @@ function begin_grab() {
         fi
         ;;
     region)
+        if [[ "${CURRENT}" -eq 1 ]]; then
+            printf "Warning!\nMode %s doesn't accept --active, --current or --mode active.\n Proceeding to capture..." "${option}"
+            sleep 1s
+        fi
         geometry=$(grab_region)
         ;;
     window)
@@ -286,8 +397,11 @@ function begin_grab() {
         geometry=$(trim "${geometry}")
         ;;
     viewport)
-        do_viewport
-        exit 0
+        if [[ "${CURRENT}" -eq 1 ]]; then
+            printf "Warning!\nMode %s doesn't accept --active, --current or --mode active.\n Continuing capture..." "${option}"
+            sleep 1s
+        fi
+        geometry=$(grab_viewport)
         ;;
     esac
     if [[ "${DELAY}" -gt 0 ]] 2>/dev/null; then
@@ -295,31 +409,10 @@ function begin_grab() {
     fi
     save_geometry "${geometry}"
     printf "Area captured %s\n" "${geometry}"
-
 }
 
 function grab_output() {
     slurp -or
-
-}
-# For taking screenshot of all displays/screens. Won't ignore reserved areas etc
-function do_viewport() {
-    ${GRABBER} "${SAVE_FULLPATH}"
-    grab_viewport
-    send_notification "${SAVE_FULLPATH}"
-}
-
-function grab_viewport() {
-    local -i full_width
-    local -i highest_height
-
-    monitors_information="$(hyprctl monitors -j | jq --raw-output --compact-output '.[] | select(.disabled == false ) | {name: .name, width: .width, height: .height}')"
-    monitors_names="$(printf "%s" "${monitors_information}" | jq --raw-output --compact-output '.name')"
-    full_width="$(hyprctl monitors -j | jq --raw-output --compact-output '[.[] | .width | tonumber] | add')"
-    highest_height="$(hyprctl monitors -j | jq --raw-output --compact-output '[.[] | .width ] | max')"
-
-    printf "Viewport width: %s and Height: %s\n Outputs: %b\n" "${full_width}" "${highest_height}" "${monitors_names}"
-
 }
 
 function grab_active_output() {
@@ -334,9 +427,9 @@ function grab_active_output() {
     active_workspace_id="$(printf "%s" "${active_workspace}" | jq --raw-output --compact-output '.id')" # returns id as int
     current_monitor="$(printf "%s" "${monitors}" | jq --raw-output --compact-output 'first(.[] | select(.activeWorkspace.id == '"${active_workspace_id}"'))')"
 
-    Print "Monitors: %s\n" "${monitors}"
-    Print "Active workspace: %s\n" "${active_workspace}"
-    Print "Current output: %s\n" "${current_monitor}"
+    re_print "Monitors: %s\n" "${monitors}"
+    re_print "Active workspace: %s\n" "${active_workspace}"
+    re_print "Current output: %s\n" "${current_monitor}"
     printf "%s" "${current_monitor}" | jq --raw-output --compact-output '"\(.x),\(.y) \(.width/.scale|round)x\(.height/.scale|round)"'
 }
 
@@ -347,7 +440,7 @@ function grab_selected_output() {
     monitor_name="$(printf "%s" "${1:-}")"
     monitor=$(hyprctl -j monitors | jq --raw-output --compact-output '.[] | select(.name == "'"${monitor_name}"'")')
 
-    Print "Capturing: %s\n" "${1}"
+    re_print "Capturing: %s\n" "${1}"
     printf "%s" "${monitor}" | jq --raw-output --compact-output '"\(.x),\(.y) \(.width/.scale|round)x\(.height/.scale|round)"'
 }
 
@@ -361,17 +454,16 @@ function grab_window() {
     local boxes
 
     monitors=$(hyprctl -j monitors)
-    get_monitors="$(printf "%s\n" "${monitors}" | jjq --raw-output --compact-output 'map(.activeWorkspace.id) | join(",")')"
+    get_monitors="$(printf "%s\n" "${monitors}" | jq --raw-output --compact-output 'map(.activeWorkspace.id) | join(",")')"
     clients=$(hyprctl -j clients | jq --raw-output --compact-output '[.[] | select(.workspace.id | contains('"${get_monitors}"'))]')
     boxes="$(printf "%s\n" "${clients}" | jq --raw-output --compact-output '.[] | "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1]) \(.title)"' | cut --fields=1,2 --delimiter=' ')"
 
-    Print "Monitors: %s\n" "${monitors}"
-    Print "Clients: %s\n" "${clients}"
+    re_print "Monitors: %s\n" "${monitors}"
+    re_print "Clients: %s\n" "${clients}"
     # Generate boxes for each visible window and send that to slurp
     # through stdin
-    Print "Boxes:\n%s\n" "${boxes}"
+    re_print "Boxes:\n%s\n" "${boxes}"
     slurp -r <<<"${boxes}"
-
 }
 
 function grab_active_window() {
@@ -382,17 +474,48 @@ function grab_active_window() {
     active_window=$(hyprctl -j activewindow)
     box=$(printf "%s" "${active_window}" | jq --raw-output --compact-output '"\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"' | cut --fields=1,2 --delimiter=' ')
 
-    Print "Box:\n%s\n" "${box}"
+    re_print "Box:\n%s\n" "${box}"
     printf "%s" "${box}"
+}
 
+function show_viewport() {
+    ${GRABBER} "${SAVE_FULLPATH}"
+    # show_viewport
+    # send_notification "${SAVE_FULLPATH}"
+}
+# For taking screenshot of all displays/screens. Won't ignore reserved areas etc
+# grim already can take screen shots of the all screens at once
+function grab_viewport() {
+
+    local monitors_information
+    local monitors_names
+    local -i full_width
+    local -i highest_height
+    local info_message
+
+    monitors_information="$(hyprctl monitors -j | jq --raw-output --compact-output '.[] | select(.disabled == false ) | {name: .name, width: .width, height: .height}')"
+    monitors_names="$(printf "%s" "${monitors_information}" | jq --raw-output --compact-output '.name')"
+    full_width="$(hyprctl monitors -j | jq --raw-output --compact-output '[.[] | .width | tonumber] | add')"
+    highest_height="$(hyprctl monitors -j | jq --raw-output --compact-output '[.[] | .width ] | max')"
+    info_message=""
+
+    if [[ "${info_message}" == '' ]]; then
+        printf "0,0 %sx%s" "${full_width}" "${highest_height}"
+    else
+        printf "Viewport width: %s and Height: %s\n Outputs: %b\n" "${full_width}" "${highest_height}" "${monitors_names}"
+    fi
 }
 
 function validate_modes() {
 
-    local "${1}"
+    local mode
+    mode="${1}"
     shift
     local -a AVAILABLE_MODES
     local -i elements
+    local -a root_modes
+    local valid_regex
+    valid_regex="[a-z]{1,}"
     AVAILABLE_MODES=(
         "window"
         "region"
@@ -402,34 +525,38 @@ function validate_modes() {
     )
     elements="${#AVAILABLE_MODES[@]}"
 
-    # Print "A mode is required\n\nAvailable modes are:\n\toutput\n\tregion\n\twindow\n"
+    if [[ "${mode}" =~ ${valid_regex} ]]; then
+        printf "%s is not a valid mode or invalid character.\n" "${mode}"
+    fi
 
     if [[ ! "${mode}" =~ ${AVAILABLE_MODES[*]} ]]; then
         if [[ "${mode}" == "" ]]; then
-            printf "'%s' is not a known mode\nValid modes are:\n" "${mode}"
-        else
             printf "A mode is required\n"
+        else
+            printf "'%s' is not a valid mode\n" "${mode}"
         fi
+        printf "%bAvailable modes are:\n" "\t"
         for m in "${!AVAILABLE_MODES[@]}"; do
             if [[ "${m}" -eq 0 ]]; then
                 printf "%s" "${AVAILABLE_MODES[$m]}"
             elif [[ "${m}" -eq $((elements - 1)) ]]; then
-                printf " and %s" "${AVAILABLE_MODES[$m]}"
+                printf " and %s\n" "${AVAILABLE_MODES[$m]}"
             else
                 printf ", %s" "${AVAILABLE_MODES[$m]}"
             fi
         done
         exit 1
     fi
-
-    if [[ "${mode}" == "active" ]]; then
-        if [[ "${#@}" -lt 4 ]]; then
-            printf "Error! %s needs to be use in conjunction with window or output.\n e.g. %s --mode output --mode active" "${mode}" "${SCRIPT_NAME}"
+    root_modes=(
+        "window"
+        "output"
+    )
+    if [[ ! "${mode}" == "active" ]] && [[ ! "${*}" =~ ${root_modes[*]} ]]; then
+        if [[ "${#@}" -lt 2 ]]; then
+            printf "Error! %s needs to be use in conjunction with the modes window or output.\n e.g. %s --mode output --mode active or %s --mode output --active" "${mode}" "${SCRIPT_NAME}" "${SCRIPT_NAME}"
             exit 1
-
         fi
     fi
-
 }
 
 function parse_mode() {
@@ -447,95 +574,19 @@ function parse_mode() {
     *)
         # Could make sense of this
         # hyprctl monitors -j | jq --raw-output --exit-status '.[] | select(.name == "'"${mode}"'")' &>/dev/null
+        # SELECTED_MONITOR="${mode}"
+        # echo "ERROR! Invalid mode: ${mode}"
         validate_modes "${mode}"
-        SELECTED_MONITOR="${mode}"
         ;;
     esac
-
 }
-
-function args() {
-
-    local options
-    options=$(getopt --options hf:o:m:D:dszrt:va --longoptions help,filename:,output-folder:,mode:,delay:,clipboard-only,debug,silent,freeze,raw,notif-timeout:,version,annotate,cursor,no-clipboard -- "$@")
-
-    eval set -- "${options}"
-
-    while true; do
-        case "${1}" in
-        -h | --help)
-            Help
-            exit
-            ;;
-        -o | --output-folder)
-            shift
-            SAVEDIR="${1}"
-            ;;
-        -f | --filename)
-            shift
-            FILENAME="${1}"
-            ;;
-        -D | --delay)
-            shift
-            DELAY="${1}"
-            ;;
-        -m | --mode)
-            shift
-            parse_mode "${1}"
-            ;;
-        --clipboard-only)
-            CLIPBOARD=1
-            ;;
-        -d | --debug)
-            DEBUG=1
-            ;;
-        -z | --freeze)
-            FREEZE=1
-            ;;
-        -s | --silent)
-            SILENT=1
-            ;;
-        -r | --raw)
-            RAW=1
-            ;;
-        -t | --notif-timeout)
-            shift
-            NOTIF_TIMEOUT="${1}"
-            ;;
-        -v | --version)
-            shift
-            printf "Hyprshot version: %s\n" "${VERSION}"
-            ;;
-        -a | --annotate)
-            ANNOTATE=1
-            ;;
-        --cursor)
-            CURSOR=1
-            ;;
-        --no-clipboard)
-            NOCLIPBOARD=1
-            ;;
-        --)
-            shift # Skip -- argument
-            COMMAND="${*:2}"
-            break
-            ;;
-        esac
-        shift
-    done
-
-    # This looks like is never gonna be reached
-    # if [[ -z "${OPTION}" ]]; then
-    #     Print "A mode is required\n\nAvailable modes are:\n\toutput\n\tregion\n\twindow\n"
-    #     exit 2
-    # fi
-
-}
-
+hyprctl monitors -j | jq --raw-output --exit-status '.[] | select(.name == "'"output"'")'
 function annotate() {
 
     local -a annotation_tools
     local -a is_installed
+    # local override
+
     annotation_tools=(
         "satty"
         "swappy"
@@ -545,7 +596,12 @@ function annotate() {
             is_installed+=("${at}")
         fi
     done
+
+    # override="${1}"
+    # echo $override
+
     sleep 0.2 # without this satty was receiving blurry images somehow. Dunno.
+
     if [[ "${#is_installed[@]}" -eq 0 ]]; then
         printf "Error! Did not find an annotation tool installed. Looked for %s and %s\n" "${annotation_tools[0]}" "${annotation_tools[1]}"
         exit 1
@@ -554,14 +610,12 @@ function annotate() {
     else
         swappy --file - --output-file "${SAVE_FULLPATH}" || return 0
     fi
-
 }
 
-function select_helper() {
+function select_grab_tool() {
 
     local -a capture_helper
     local -a is_installed
-    local -g GRABBER
     capture_helper=(
         "grim"
         "wayshot"
@@ -576,10 +630,104 @@ function select_helper() {
         printf "Error! Couldn't find %s or %s\n" "${capture_helper[0]}" "${capture_helper[1]}"
         exit 1
     elif [[ "${#is_installed[@]}" -gt 1 ]]; then
-        [[ "${CURSOR}" -eq 1 ]] && GRABBER="grim -c" || GRABBER="grim"
+        if [[ "${CURSOR}" -eq 1 ]]; then
+            printf "%s" "grim -c"
+        else
+            printf "%s" "grim"
+        fi
     else
-        [[ "${CURSOR}" -eq 1 ]] && GRABBER="wayshot -c" || GRABBER="wayshot"
+        if [[ "${CURSOR}" -eq 1 ]]; then
+            printf "%s" "wayshot -c"
+        else
+            printf "%s" "wayshot"
+        fi
     fi
+}
+
+function show_version() {
+
+    local format
+
+    format="${1}"
+
+    if [[ "${format}" =~ j|json ]]; then
+        printf "{\"name\":\"%s\",\"version\":\"%s\"}" "${SCRIPT_NAME}" "${VERSION}"
+    else
+        printf "Hyprshot version: %b" "${VERSION}"
+    fi
+
+}
+
+function initial_checks() {
+    local -a needed
+    local -a optional
+    local -a needed_found
+    local -a optional_found
+    local -a needed_notfound
+    local -a optional_notfound
+
+    needed=(
+        "grim"
+        "jq"
+    )
+    optional=(
+        "hyprpicker"
+        "satty"
+        "swappy"
+        "wayshot"
+    )
+
+    if [[ ! "${XDG_SESSION_DESKTOP}" == "Hyprland" ]]; then
+        printf "%s session detect. This is not a Hyprland session." "${XDG_SESSION_DESKTOP}"
+        exit 1
+    fi
+    for n in "${needed[@]}"; do
+        if command -v "${n}" >/dev/null; then
+            needed_found+=("${n}")
+        else
+            needed_notfound+=("${n}")
+        fi
+    done
+
+    if [[ "${#needed_found[@]}" -lt 2 ]]; then
+        printf "%s was not able to find %b" "${SCRIPT_NAME[*]}" "${needed[*]}"
+        exit 1
+    fi
+
+    for o in "${optional[@]}"; do
+        if command -v "${o}" >/dev/null; then
+            optional_found+=("${o}")
+        else
+            optional_notfound+=("${o}")
+        fi
+    done
+
+    if [[ "${DEBUG}" -eq 1 ]]; then
+        printf "Needed tools found: %s\n" "${needed_found[*]}"
+        printf "Optional tools found: %s\n" "${optional_found[*]}"
+    elif [[ "${#needed_notfound[*]}" -gt 0 ]]; then
+        printf "Needed tools not found: %s\n" "${needed_notfound[*]}"
+        if [[ "${#optional_notfound[*]}" -gt 0 ]]; then
+            printf "Optional tools found: %s\n" "${optional_notfound[*]}"
+        fi
+    fi
+
+}
+
+function displays_info() {
+
+    local -a hyprland_outputs
+    mapfile -t hyprland_outputs < <(hyprctl monitors -j | jq --raw-output '.[] | [.id,.name,.description] | join(" | ")')
+
+    # select output in "${hyprland_outputs[@]}"; do
+    #     # printf "You selected %s (%s)\n" "${output}" "${REPLY}"
+    #     printf "%s" "${output// /}" | cut --delimiter="|" --fields=2
+    #     break
+    # done </dev/tty
+
+    for ho in "${hyprland_outputs[@]}"; do
+        printf "%s\n" "${ho}"
+    done
 
 }
 
